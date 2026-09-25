@@ -190,35 +190,226 @@ GOLDEN_OUTPUT = capture(legacy_main)
 # ==============================================================================
 
 # --- named constants (replace the magic numbers) ---
-# TAX_RATE           = ...
-# FOOD_CATEGORY      = ...
-# DISCOUNT_THRESHOLD = ...
-# BULK_QTY_THRESHOLD = ...
-# BULK_DISCOUNT_RATE = ...
-# POINTS_DIVISOR     = ...
+STANDARD_TAX_RATE  = 0.07   # electronics & stationery
+FOOD_TAX_RATE      = 0.0    # food is tax-free
+DISCOUNT_THRESHOLD = 100    # tier discount is bigger when subtotal is ABOVE this
+BULK_QTY_THRESHOLD = 10     # 10 or more items in total -> bulk discount
+BULK_DISCOUNT_RATE = 0.03
+POINTS_DIVISOR     = 10     # 1 point (x tier multiplier) per 10 spent
+MONEY_DECIMALS     = 2
+RULE_WIDTH         = 40     # width of the "-----" line on the receipt
 
-# class Product:
-#     ...
 
-# class OrderItem:          # has-a Product
-#     ...
+# --- products: each product decides its own tax ---
+class Product:
+    """A product for sale. Standard products are taxed at STANDARD_TAX_RATE."""
 
-# class Customer:           # base tier; then Silver / Gold / Platinum subclasses
-#     ...
+    tax_rate = STANDARD_TAX_RATE
 
-# class Order:              # has-a Customer, has-many OrderItem
-#     def subtotal(self): ...     # pure: returns a number
-#     def discount(self): ...     # pure
-#     def tax(self): ...          # pure
-#     def total(self): ...        # pure
-#     def points(self): ...       # pure
-#     def receipt(self):          # builds the receipt text (no calculation here)
-#         ...
+    def __init__(self, name, price):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Product name must be a non-empty string")
+        if not isinstance(price, (int, float)) or price < 0:
+            raise ValueError("Product price must be a number >= 0")
+        self._name = name
+        self._price = price
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def price(self):
+        return self._price
+
+    def tax_on(self, amount):
+        return amount * self.tax_rate
+
+    def __str__(self):
+        return self._name + " @ " + str(self._price)
+
+
+class FoodProduct(Product):
+    """Food is tax-free."""
+
+    tax_rate = FOOD_TAX_RATE
+
+
+# --- an order line: has-a Product ---
+class OrderItem:
+    def __init__(self, product, quantity):
+        if not isinstance(product, Product):
+            raise TypeError("OrderItem needs a Product")
+        if not isinstance(quantity, int) or quantity < 1:
+            raise ValueError("Quantity must be a whole number >= 1")
+        self._product = product
+        self._quantity = quantity
+
+    @property
+    def product(self):
+        return self._product
+
+    @property
+    def quantity(self):
+        return self._quantity
+
+    def line_total(self):
+        return self._product.price * self._quantity
+
+    def tax(self):
+        return self._product.tax_on(self.line_total())
+
+    def __str__(self):
+        return self._product.name + " x" + str(self._quantity) + " = " + str(self.line_total())
+
+
+# --- customers: one class per membership tier (no `if tier == ...`) ---
+class Customer:
+    """Base tier ("none"): no discount, x1 points."""
+
+    tier_name = "none"
+    small_order_rate = 0.0    # subtotal <= DISCOUNT_THRESHOLD
+    large_order_rate = 0.0    # subtotal >  DISCOUNT_THRESHOLD
+    points_multiplier = 1
+
+    def __init__(self, name):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Customer name must be a non-empty string")
+        self._name = name
+
+    @property
+    def name(self):
+        return self._name
+
+    def discount_rate(self, subtotal):
+        if subtotal > DISCOUNT_THRESHOLD:
+            return self.large_order_rate
+        return self.small_order_rate
+
+    def tier_discount(self, subtotal):
+        return subtotal * self.discount_rate(subtotal)
+
+    def points_for(self, total):
+        return int(total // POINTS_DIVISOR) * self.points_multiplier
+
+    def __str__(self):
+        return self._name + " (" + self.tier_name + ")"
+
+
+class SilverCustomer(Customer):
+    tier_name = "silver"
+    small_order_rate = 0.02
+    large_order_rate = 0.05
+    points_multiplier = 2
+
+
+class GoldCustomer(Customer):
+    tier_name = "gold"
+    small_order_rate = 0.05
+    large_order_rate = 0.10
+    points_multiplier = 3
+
+
+class PlatinumCustomer(Customer):
+    tier_name = "platinum"
+    small_order_rate = 0.10
+    large_order_rate = 0.15
+    points_multiplier = 5
+
+
+# --- an order: has-a Customer, has-many OrderItem.  Pure calculations only. ---
+class Order:
+    def __init__(self, customer, items):
+        if not isinstance(customer, Customer):
+            raise TypeError("Order needs a Customer")
+        items = list(items)
+        if not items or not all(isinstance(it, OrderItem) for it in items):
+            raise ValueError("Order needs at least one OrderItem")
+        self._customer = customer
+        self._items = items
+
+    @property
+    def customer(self):
+        return self._customer
+
+    @property
+    def items(self):
+        return list(self._items)
+
+    def subtotal(self):
+        return sum(item.line_total() for item in self._items)
+
+    def total_quantity(self):
+        return sum(item.quantity for item in self._items)
+
+    def bulk_discount(self):
+        if self.total_quantity() >= BULK_QTY_THRESHOLD:
+            return self.subtotal() * BULK_DISCOUNT_RATE
+        return 0.0
+
+    def discount(self):
+        return self._customer.tier_discount(self.subtotal()) + self.bulk_discount()
+
+    def tax(self):
+        return sum(item.tax() for item in self._items)
+
+    def total(self):
+        return self.subtotal() - self.discount() + self.tax()
+
+    def points(self):
+        return self._customer.points_for(self.total())
+
+
+# --- presentation: WHAT the receipt shows (no calculation rules in here) ---
+def money(amount):
+    return str(round(amount, MONEY_DECIMALS))
+
+
+def format_receipt(order):
+    rule = "-" * RULE_WIDTH
+    lines = ["Receipt for " + str(order.customer), rule]
+    lines += [str(item) for item in order.items]
+    lines += [
+        rule,
+        "Subtotal: " + money(order.subtotal()),
+        "Discount: " + money(order.discount()),
+        "Tax: " + money(order.tax()),
+        "Total: " + money(order.total()),
+        "Points earned: " + str(order.points()),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# --- the store's data, as objects ---
+def build_orders():
+    laptop       = Product("Laptop", 1200.0)
+    headphones   = Product("Headphones", 200.0)
+    coffee_beans = FoodProduct("Coffee Beans", 15.0)
+    notebook     = Product("Notebook", 5.0)
+    water_bottle = FoodProduct("Water Bottle", 10.0)
+    monitor      = Product("Monitor", 300.0)
+    pen          = Product("Pen", 2.0)
+
+    return [
+        Order(GoldCustomer("Alice"),
+              [OrderItem(laptop, 1), OrderItem(headphones, 2), OrderItem(coffee_beans, 3)]),
+        Order(Customer("Bob"),
+              [OrderItem(notebook, 10), OrderItem(pen, 5)]),
+        Order(PlatinumCustomer("Charlie"),
+              [OrderItem(monitor, 2), OrderItem(water_bottle, 6), OrderItem(coffee_beans, 2)]),
+        Order(SilverCustomer("Dana"),
+              [OrderItem(headphones, 1), OrderItem(notebook, 3), OrderItem(pen, 10)]),
+    ]
 
 
 def refactored_main():
     """Print every receipt and the grand total — same output as legacy_main()."""
-    raise NotImplementedError("Build your refactored program, then delete this line.")
+    orders = build_orders()
+    for order in orders:
+        print(format_receipt(order))
+    grand_total = sum(order.total() for order in orders)
+    print("GRAND TOTAL (all orders): " + money(grand_total))
 
 
 # ==============================================================================
